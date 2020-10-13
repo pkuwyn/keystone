@@ -35,6 +35,8 @@ class PrismaAdapter extends BaseKeystoneAdapter {
     // TODO: Should we default to 'public' or null?
     if (this.provider === 'postgresql') {
       return this.dbSchemaName ? `${this.url}?schema=${this.dbSchemaName}` : this.url;
+    } else if (this.provider === 'sqlite') {
+      return this.url;
     }
   }
 
@@ -222,6 +224,13 @@ class PrismaAdapter extends BaseKeystoneAdapter {
             `ALTER SEQUENCE \"${this.dbSchemaName}\".\"${relname}\" RESTART WITH 1;`
           );
         }
+      }
+    } else if (this.provider === 'sqlite') {
+      const tables = await this.prisma.$queryRaw(
+        "SELECT name FROM sqlite_master WHERE type='table';"
+      );
+      for (const { name } of tables) {
+        await this.prisma.$queryRaw(`DELETE FROM "${name}";`);
       }
     }
 
