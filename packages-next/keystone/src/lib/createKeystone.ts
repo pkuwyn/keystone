@@ -182,6 +182,8 @@ export function createKeystone(config: KeystoneConfig): Keystone {
         })
       );
     };
+    // FIXME: This should let us user server-side-graphql-library until new APIs are implemented
+    const executeGraphQL = async ({ query, variables }) => rawGraphQL({ query, variables });
     const contextToReturn: any = {
       schemaName: 'public',
       ...(skipAccessControl ? skipAccessControlContext : accessControlContext),
@@ -200,6 +202,7 @@ export function createKeystone(config: KeystoneConfig): Keystone {
         },
         schema: graphQLSchema,
       } as KeystoneGraphQLAPI<any>,
+      executeGraphQL, // FIXME: backwards compat for now
       maxTotalResults: (keystone as any).queryLimits.maxTotalResults,
       createContext,
       ...sessionContext,

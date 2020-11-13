@@ -1,4 +1,5 @@
-import { createSchema, list } from '@keystone-next/keystone/schema';
+import { getItem, getItems, updateItem, createItem, deleteItems } from '@keystone/server-side-graphql-query';
+import { createSchema, list, graphQLSchemaExtension } from '@keystone-next/keystone/schema';
 import { text, relationship, password, select, virtual, integer } from '@keystone-next/fields';
 import { cloudinaryImage } from '@keystone-next/cloudinary';
 import type { ListsAPI, AccessControl } from './types';
@@ -7,8 +8,8 @@ import type { ListsAPI, AccessControl } from './types';
   TODO
     - [ ] Access Control (new Roles system)
     - [ ] Tracking (createdAt, updatedAt, updatedAt, updatedBy)
-    - [ ] Port the addToCard mutation
-    - [ ] Port the checkout mutation
+    - [.] Port the addToCard mutation
+    - [.] Port the checkout mutation
     - [x] User: could create an isAdmin user?
     - [x] CartItem: labelResolver -> virtual field
     - [x] Item: price integer field missing defaultValue, isRequired
@@ -197,4 +198,129 @@ export const lists = createSchema({
       }),
     },
   }),
+};
+
+export const extendGraphqlSchema = graphQLSchemaExtension({
+  typeDefs: gql`
+    type Mutation {
+      addToCart(id: ID): CardItem
+      checkout(token: String!): Order
+    }
+  `,
+  resolvers: {
+    Mutation: {
+      checkout: async (root, { token }, context) => {
+        const { authedItem } = context;
+        // 1. Query the current user and make sure they are signed in
+        const { id: userId } = authedItem;
+        if (!userId) throw new Error('You must be signed in to complete this order.');
+
+        // FIXME: Use the new graphQL API when it's available
+        const User = await getItem({
+          context,
+          listKey: 'User',
+          itemId: userId,
+          returnFields: `
+            id
+            name
+            email
+            cart {
+              id
+              quantity
+              item { name price id description image { publicUrlTransformed } }
+            }`,
+        });
+
+        // 2. recalculate the total for the price
+        const amount = User.cart.reduce(
+          (tally, cartItem) => tally + cartItem.item.price * cartItem.quantity,
+          0
+        );
+        console.log(`Going to charge for a total of ${amount}`);
+
+        // 3. Create the Payment Intent, given the Payment Method ID
+        // by passing confirm: true, We do stripe.paymentIntent.create() and stripe.paymentIntent.confirm() in 1 go.
+        // FIXME: How do we test this? Is this going to charge someone's card?
+        const charge = await stripe.paymentIntents.create({
+          amount,
+          currency: 'USD',
+          confirm: true,
+          payment_method: token,
+        });
+        console.log(charge);
+
+        // 4. Convert the CartItems to OrderItems
+        const orderItems = User.cart.map(cartItem => {
+          // FIXME: This is all out of date
+          const orderItem = {
+            ...cartItem.item,
+            quantity: cartItem.quantity,
+            user: { connect: { id: userId } },
+            image: { connect: cartItem.item.image.publicUrlTransformed },
+          };
+          // FIXME: Let's construct the object explicitly so we don't have to delete items
+          delete orderItem.id;
+          delete orderItem.user;
+          return orderItem;
+        });
+
+        // 5. create the Order
+        console.log('Creating the order');
+        // FIXME: Do this with the CRUD API so as to obtain a returnable object
+        const order = await createItem({
+          context,
+          listKey: 'Order',
+          item: {
+            total: charge.amount,
+            charge: `${charge.id}`,
+            items: { create: orderItems },
+            user: { connect: { id: userId } },
+          },
+        });
+        // 6. Clean up - clear the users cart, delete cartItems
+        const cartItemIds = User.cart.map(cartItem => cartItem.id);
+        await deleteItems({ context, listKey: 'CartItem', items: cartItemIds });
+
+        // 7. Return the Order to the client
+        // FIXME: Return from the CRUD API
+        return order.data.createOrder;
+      },
+      addToCart: async (root, { id }, context) => {
+        const { authedItem } = context;
+        // 1. Make sure they are signed in
+        const { id: userId } = authedItem;
+        if (!userId) {
+          throw new Error('You must be signed in soooon');
+        }
+        // 2. Query the users current cart, to see if they already have that item
+        const allCartItems = await getItems({
+          context,
+          where: { user: { id: userId }, item: { id } },
+          listKey: 'CartItem',
+          returnFields: 'id quantity',
+        });
+
+        // 3. Check if that item is already in their cart and increment by 1 if it is
+        const [existingCartItem] = allCartItems;
+        if (existingCartItem) {
+          const { quantity } = existingCartItem;
+          console.log(`There are already ${quantity} of these items in their cart`);
+          // FIXME: User CRUD API to get proper return type;
+          return await updateItem({
+            context,
+            listKey: 'CartItem',
+            item: { id: existingCartItem.id, data: { quantity: quantity + 1 } },
+          });
+        } else {
+          // 4. If its not, create a fresh CartItem for that user!
+          // FIXME: User CRUD API to get proper return type;
+          return await createItem({
+            context,
+            listKey: 'CardItem',
+            item: { item: { connect: { id: id }, user: { connect: { id: userId } } } },
+          });
+        }
+      },
+    },
+  },
 });
